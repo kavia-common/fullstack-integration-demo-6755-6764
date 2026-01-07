@@ -11,6 +11,10 @@ Features:
 - Comprehensive test case validation (TC-01 through TC-04)
 - Scheduling-ready design with configurable intervals
 - Detailed metrics and reporting
+- Configuration file support (JSON)
+- CSV export for analysis
+- Alert system with threshold-based notifications
+- Technical indicators (Moving averages, RSI)
 
 PUBLIC_INTERFACE
 """
@@ -19,9 +23,10 @@ import requests
 import json
 import logging
 import time
+import csv
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Any
 from dataclasses import dataclass, asdict
 from enum import Enum
 
@@ -68,14 +73,82 @@ class MonitorConfig:
     tc03_weight: int = 20  # Founder engagement test weight
     tc04_weight: int = 10  # Unlock stability test weight
     
+    # Alert Configuration
+    alert_enabled: bool = True
+    alert_on_score_below: int = 60
+    email_notifications: bool = False
+    slack_webhook: str = ""
+    
     # Data Storage
     data_dir: str = "monitoring_data"
     history_file: str = "price_history.json"
     report_file: str = "latest_report.json"
+    history_retention_days: int = 90
     
     # Logging
     log_level: str = "INFO"
     log_file: str = "crypto_monitor.log"
+    console_output: bool = True
+    
+    @classmethod
+    def from_json(cls, json_path: str) -> 'MonitorConfig':
+        """
+        Load configuration from JSON file
+        
+        PUBLIC_INTERFACE
+        """
+        try:
+            with open(json_path, 'r') as f:
+                config_data = json.load(f)
+            
+            # Flatten nested structure
+            flat_config = {}
+            
+            if 'api' in config_data:
+                flat_config['api_base_url'] = config_data['api'].get('base_url', cls.api_base_url)
+                flat_config['api_timeout'] = config_data['api'].get('timeout', cls.api_timeout)
+                flat_config['max_retries'] = config_data['api'].get('max_retries', cls.max_retries)
+                flat_config['retry_delay'] = config_data['api'].get('retry_delay', cls.retry_delay)
+            
+            if 'assets' in config_data:
+                flat_config['ada_id'] = config_data['assets'].get('ada_id', cls.ada_id)
+                flat_config['night_id'] = config_data['assets'].get('night_id', cls.night_id)
+            
+            if 'thresholds' in config_data:
+                for key in ['target_ratio', 'ratio_sell_pressure', 'tvl_monthly_growth', 
+                           'min_zk_dapps', 'stability_threshold', 'crash_threshold', 'min_volume_ratio']:
+                    if key in config_data['thresholds']:
+                        flat_config[key] = config_data['thresholds'][key]
+            
+            if 'weights' in config_data:
+                for key in ['tc01_weight', 'tc02_weight', 'tc03_weight', 'tc04_weight']:
+                    if key in config_data['weights']:
+                        flat_config[key] = config_data['weights'][key]
+            
+            if 'alerts' in config_data:
+                flat_config['alert_enabled'] = config_data['alerts'].get('enabled', cls.alert_enabled)
+                flat_config['alert_on_score_below'] = config_data['alerts'].get('alert_on_score_below', cls.alert_on_score_below)
+                flat_config['email_notifications'] = config_data['alerts'].get('email_notifications', cls.email_notifications)
+                flat_config['slack_webhook'] = config_data['alerts'].get('slack_webhook', cls.slack_webhook)
+            
+            if 'data' in config_data:
+                flat_config['data_dir'] = config_data['data'].get('data_dir', cls.data_dir)
+                flat_config['history_file'] = config_data['data'].get('history_file', cls.history_file)
+                flat_config['report_file'] = config_data['data'].get('report_file', cls.report_file)
+                flat_config['history_retention_days'] = config_data['data'].get('history_retention_days', cls.history_retention_days)
+            
+            if 'logging' in config_data:
+                flat_config['log_level'] = config_data['logging'].get('log_level', cls.log_level)
+                flat_config['log_file'] = config_data['logging'].get('log_file', cls.log_file)
+                flat_config['console_output'] = config_data['logging'].get('console_output', cls.console_output)
+            
+            return cls(**flat_config)
+        
+        except FileNotFoundError:
+            return cls()  # Return default config if file not found
+        except Exception as e:
+            logging.warning(f"Failed to load config from {json_path}: {e}. Using defaults.")
+            return cls()
 
 
 # ============================================================================
@@ -91,14 +164,19 @@ def setup_logging(config: MonitorConfig) -> logging.Logger:
     logger = logging.getLogger("CryptoMonitor")
     logger.setLevel(getattr(logging, config.log_level))
     
-    # Console handler with formatting
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_format = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    console_handler.setFormatter(console_format)
+    # Remove existing handlers
+    logger.handlers.clear()
+    
+    if config.console_output:
+        # Console handler with formatting
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_format = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        console_handler.setFormatter(console_format)
+        logger.addHandler(console_handler)
     
     # File handler for persistent logs
     log_path = Path(config.data_dir) / config.log_file
@@ -109,8 +187,6 @@ def setup_logging(config: MonitorConfig) -> logging.Logger:
         '%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s] - %(message)s'
     )
     file_handler.setFormatter(file_format)
-    
-    logger.addHandler(console_handler)
     logger.addHandler(file_handler)
     
     return logger
@@ -129,6 +205,19 @@ class CryptoMetrics:
     volume_24h: float
     price_change_24h: float
     market_cap: Optional[float] = None
+    
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+
+@dataclass
+class TechnicalIndicators:
+    """Technical analysis indicators"""
+    sma_7: Optional[float] = None  # 7-day simple moving average
+    sma_30: Optional[float] = None  # 30-day simple moving average
+    rsi_14: Optional[float] = None  # 14-day relative strength index
+    volatility_7d: Optional[float] = None  # 7-day price volatility
+    volume_trend: Optional[str] = None  # Increasing/Decreasing
     
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -159,9 +248,10 @@ class MonitoringReport:
     verdict: str
     recommendation: str
     edge_case_warnings: List[str]
+    technical_indicators: Optional[TechnicalIndicators] = None
     
     def to_dict(self) -> Dict:
-        return {
+        result = {
             'timestamp': self.timestamp,
             'test_environment': self.test_environment,
             'ada_metrics': self.ada_metrics.to_dict(),
@@ -184,6 +274,11 @@ class MonitoringReport:
             'recommendation': self.recommendation,
             'edge_case_warnings': self.edge_case_warnings
         }
+        
+        if self.technical_indicators:
+            result['technical_indicators'] = self.technical_indicators.to_dict()
+        
+        return result
 
 
 # ============================================================================
@@ -205,6 +300,8 @@ class CoinGeckoClient:
             'User-Agent': 'Mozilla/5.0 (Crypto Monitor Bot)',
             'Accept': 'application/json'
         })
+        self._cache: Dict[str, Tuple[Any, float]] = {}
+        self._cache_duration = 60  # Cache for 60 seconds
     
     def get_crypto_data(self, asset_ids: List[str]) -> Optional[Dict]:
         """
@@ -218,6 +315,15 @@ class CoinGeckoClient:
             
         PUBLIC_INTERFACE
         """
+        cache_key = ','.join(sorted(asset_ids))
+        
+        # Check cache
+        if cache_key in self._cache:
+            cached_data, cache_time = self._cache[cache_key]
+            if time.time() - cache_time < self._cache_duration:
+                self.logger.debug("Returning cached data")
+                return cached_data
+        
         url = f"{self.config.api_base_url}/simple/price"
         params = {
             "ids": ",".join(asset_ids),
@@ -241,6 +347,9 @@ class CoinGeckoClient:
                 # Validate response structure
                 if not self._validate_response(data, asset_ids):
                     raise ValueError("Invalid API response structure")
+                
+                # Cache the result
+                self._cache[cache_key] = (data, time.time())
                 
                 self.logger.info(f"Successfully fetched data for {len(asset_ids)} assets")
                 return data
@@ -282,9 +391,9 @@ class CoinGeckoClient:
             
             asset_data = data[asset_id]
             required_fields = ['usd', 'usd_24h_vol', 'usd_24h_change']
-            for field in required_fields:
-                if field not in asset_data:
-                    self.logger.error(f"Missing field '{field}' for {asset_id}")
+            for required_field in required_fields:
+                if required_field not in asset_data:
+                    self.logger.error(f"Missing field '{required_field}' for {asset_id}")
                     return False
         
         return True
@@ -319,9 +428,12 @@ class DataManager:
             history = self.load_history()
             history.append(metrics)
             
-            # Keep only last 90 days of data
-            if len(history) > 90:
-                history = history[-90:]
+            # Keep only data within retention period
+            cutoff_date = datetime.now() - timedelta(days=self.config.history_retention_days)
+            history = [
+                entry for entry in history
+                if datetime.fromisoformat(entry['timestamp']) > cutoff_date
+            ]
             
             with open(self.history_file, 'w') as f:
                 json.dump(history, f, indent=2)
@@ -359,6 +471,46 @@ class DataManager:
         except Exception as e:
             self.logger.error(f"Failed to save report: {e}")
     
+    def export_to_csv(self, output_file: str = "monitoring_export.csv"):
+        """
+        Export historical data to CSV format
+        
+        PUBLIC_INTERFACE
+        """
+        try:
+            history = self.load_history()
+            if not history:
+                self.logger.warning("No historical data to export")
+                return
+            
+            csv_path = self.data_path / output_file
+            
+            with open(csv_path, 'w', newline='') as csvfile:
+                fieldnames = [
+                    'timestamp', 'current_ratio', 'ada_price', 'night_price',
+                    'ada_volume', 'night_volume', 'total_score', 'verdict'
+                ]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                
+                writer.writeheader()
+                for entry in history:
+                    writer.writerow({
+                        'timestamp': entry.get('timestamp', ''),
+                        'current_ratio': entry.get('current_ratio', 0),
+                        'ada_price': entry.get('ada_metrics', {}).get('price_usd', 0),
+                        'night_price': entry.get('night_metrics', {}).get('price_usd', 0),
+                        'ada_volume': entry.get('ada_metrics', {}).get('volume_24h', 0),
+                        'night_volume': entry.get('night_metrics', {}).get('volume_24h', 0),
+                        'total_score': entry.get('total_score', 0),
+                        'verdict': entry.get('verdict', '')
+                    })
+            
+            self.logger.info(f"Exported data to {csv_path}")
+            print(f"✓ Data exported to: {csv_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to export to CSV: {e}")
+    
     def get_historical_trend(self, days: int = 30) -> Dict:
         """
         Calculate historical trends over specified period
@@ -394,6 +546,152 @@ class DataManager:
             'volatility': round(volatility, 4),
             'trend': 'increasing' if ratios[-1] > ratios[0] else 'decreasing'
         }
+    
+    def calculate_technical_indicators(self, asset_id: str = 'night') -> TechnicalIndicators:
+        """
+        Calculate technical indicators from historical data
+        
+        PUBLIC_INTERFACE
+        """
+        history = self.load_history()
+        
+        if len(history) < 7:
+            return TechnicalIndicators()
+        
+        # Extract price data
+        prices = []
+        volumes = []
+        
+        for entry in history:
+            if asset_id == 'night':
+                metrics = entry.get('night_metrics', {})
+            else:
+                metrics = entry.get('ada_metrics', {})
+            
+            if 'price_usd' in metrics:
+                prices.append(metrics['price_usd'])
+            if 'volume_24h' in metrics:
+                volumes.append(metrics['volume_24h'])
+        
+        indicators = TechnicalIndicators()
+        
+        # Calculate SMAs
+        if len(prices) >= 7:
+            indicators.sma_7 = round(sum(prices[-7:]) / 7, 4)
+        
+        if len(prices) >= 30:
+            indicators.sma_30 = round(sum(prices[-30:]) / 30, 4)
+        
+        # Calculate 7-day volatility
+        if len(prices) >= 7:
+            recent_prices = prices[-7:]
+            avg = sum(recent_prices) / len(recent_prices)
+            variance = sum((p - avg) ** 2 for p in recent_prices) / len(recent_prices)
+            indicators.volatility_7d = round((variance ** 0.5) / avg * 100, 2)
+        
+        # Calculate RSI (14-period)
+        if len(prices) >= 15:
+            gains = []
+            losses = []
+            
+            for i in range(1, min(15, len(prices))):
+                change = prices[-i] - prices[-i-1]
+                if change > 0:
+                    gains.append(change)
+                    losses.append(0)
+                else:
+                    gains.append(0)
+                    losses.append(abs(change))
+            
+            avg_gain = sum(gains) / len(gains) if gains else 0
+            avg_loss = sum(losses) / len(losses) if losses else 0
+            
+            if avg_loss != 0:
+                rs = avg_gain / avg_loss
+                indicators.rsi_14 = round(100 - (100 / (1 + rs)), 2)
+            else:
+                indicators.rsi_14 = 100.0
+        
+        # Volume trend
+        if len(volumes) >= 7:
+            recent_vol = sum(volumes[-3:]) / 3
+            older_vol = sum(volumes[-7:-3]) / 4
+            indicators.volume_trend = "Increasing" if recent_vol > older_vol else "Decreasing"
+        
+        return indicators
+
+
+# ============================================================================
+# ALERT SYSTEM
+# ============================================================================
+
+class AlertManager:
+    """
+    Manages alert notifications
+    
+    PUBLIC_INTERFACE
+    """
+    
+    def __init__(self, config: MonitorConfig, logger: logging.Logger):
+        self.config = config
+        self.logger = logger
+    
+    def send_alert(self, report: MonitoringReport):
+        """
+        Send alert if conditions are met
+        
+        PUBLIC_INTERFACE
+        """
+        if not self.config.alert_enabled:
+            return
+        
+        if report.total_score < self.config.alert_on_score_below:
+            self._trigger_alert(report)
+    
+    def _trigger_alert(self, report: MonitoringReport):
+        """Trigger alert via configured channels"""
+        alert_message = self._format_alert_message(report)
+        
+        self.logger.warning("=" * 70)
+        self.logger.warning("🚨 ALERT TRIGGERED")
+        self.logger.warning(alert_message)
+        self.logger.warning("=" * 70)
+        
+        # Slack webhook
+        if self.config.slack_webhook:
+            self._send_slack_alert(alert_message)
+        
+        # Email (placeholder - requires SMTP configuration)
+        if self.config.email_notifications:
+            self.logger.info("Email notifications not yet configured")
+    
+    def _format_alert_message(self, report: MonitoringReport) -> str:
+        """Format alert message"""
+        return f"""
+CRYPTO MONITOR ALERT
+Timestamp: {report.timestamp}
+Score: {report.total_score}/100
+Verdict: {report.verdict}
+Current Ratio: {report.current_ratio:.4f}
+Recommendation: {report.recommendation}
+Warnings: {len(report.edge_case_warnings)} edge case(s) detected
+"""
+    
+    def _send_slack_alert(self, message: str):
+        """Send alert to Slack webhook"""
+        try:
+            payload = {
+                "text": f"```{message}```"
+            }
+            response = requests.post(
+                self.config.slack_webhook,
+                json=payload,
+                timeout=10
+            )
+            response.raise_for_status()
+            self.logger.info("Slack alert sent successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to send Slack alert: {e}")
 
 
 # ============================================================================
@@ -657,6 +955,7 @@ class CryptoMonitor:
         self.api_client = CoinGeckoClient(self.config, self.logger)
         self.data_manager = DataManager(self.config, self.logger)
         self.test_executor = TestExecutor(self.config, self.logger, self.data_manager)
+        self.alert_manager = AlertManager(self.config, self.logger)
     
     def execute_monitoring_cycle(self) -> Optional[MonitoringReport]:
         """
@@ -693,6 +992,9 @@ class CryptoMonitor:
         
         # Load historical data for trend analysis
         historical_data = self.data_manager.load_history()
+        
+        # Calculate technical indicators
+        tech_indicators = self.data_manager.calculate_technical_indicators('night')
         
         # Execute all test cases
         self.logger.info("-" * 70)
@@ -758,7 +1060,8 @@ class CryptoMonitor:
             total_score=total_score,
             verdict=verdict,
             recommendation=recommendation,
-            edge_case_warnings=edge_warnings
+            edge_case_warnings=edge_warnings,
+            technical_indicators=tech_indicators
         )
         
         # Print final verdict
@@ -767,6 +1070,20 @@ class CryptoMonitor:
         self.logger.info(f"Total Score: {total_score}/100")
         self.logger.info(f"Recommendation: {recommendation}")
         self.logger.info("=" * 70)
+        
+        # Print technical indicators if available
+        if tech_indicators.sma_7:
+            self.logger.info("-" * 70)
+            self.logger.info("Technical Indicators (NIGHT)")
+            self.logger.info(f"  7-Day SMA: ${tech_indicators.sma_7}")
+            if tech_indicators.sma_30:
+                self.logger.info(f"  30-Day SMA: ${tech_indicators.sma_30}")
+            if tech_indicators.rsi_14:
+                self.logger.info(f"  RSI (14): {tech_indicators.rsi_14}")
+            if tech_indicators.volatility_7d:
+                self.logger.info(f"  7-Day Volatility: {tech_indicators.volatility_7d}%")
+            if tech_indicators.volume_trend:
+                self.logger.info(f"  Volume Trend: {tech_indicators.volume_trend}")
         
         # Persist data
         self.data_manager.save_metrics({
@@ -778,6 +1095,9 @@ class CryptoMonitor:
             'verdict': verdict
         })
         self.data_manager.save_report(report)
+        
+        # Send alerts if needed
+        self.alert_manager.send_alert(report)
         
         # Print historical trend
         trend = self.data_manager.get_historical_trend()
@@ -813,26 +1133,27 @@ class CryptoMonitor:
         - 40-59: RE-TEST REQUIRED - Hold position, airdrop only
         - <40: FAIL (Critical Bug) - Risk avoidance, consider swap back to ADA
         """
+        # Apply downgrade if critical edge cases detected
+        adjusted_score = total_score
         if edge_warnings:
-            # Critical edge cases detected - downgrade verdict
             if total_score >= 85:
-                total_score = 70  # Downgrade to conditional
+                adjusted_score = 70  # Downgrade to conditional
             elif total_score >= 60:
-                total_score = 50  # Downgrade to retest
+                adjusted_score = 50  # Downgrade to retest
         
-        if total_score >= 85:
+        if adjusted_score >= 85:
             return (
                 TestVerdict.HIGHLY_STABLE.value,
                 "✓ AGGRESSIVE SWAP: Migrate 20-30% of ADA holdings to NIGHT. "
                 "All metrics indicate strong stability and growth potential."
             )
-        elif total_score >= 60:
+        elif adjusted_score >= 60:
             return (
                 TestVerdict.CONDITIONAL_PASS.value,
                 "⚠ CONSERVATIVE SWAP: Migrate only 10% of ADA holdings to NIGHT. "
                 "Maintain flexibility for market changes."
             )
-        elif total_score >= 40:
+        elif adjusted_score >= 40:
             return (
                 TestVerdict.RETEST_REQUIRED.value,
                 "⏸ HOLD POSITION: Maintain current allocation. "
@@ -903,31 +1224,82 @@ def main():
     Main entry point for the monitoring script
     
     Usage:
-        python crypto_monitor.py              # Run single cycle
-        python crypto_monitor.py --schedule   # Run continuously (24h intervals)
+        python crypto_monitor.py                    # Run single cycle
+        python crypto_monitor.py --schedule         # Run continuously (24h intervals)
+        python crypto_monitor.py --schedule 12      # Run every 12 hours
+        python crypto_monitor.py --export           # Export historical data to CSV
+        python crypto_monitor.py --config config.json  # Use custom config file
         
     PUBLIC_INTERFACE
     """
     import sys
     
-    if len(sys.argv) > 1 and sys.argv[1] == '--schedule':
-        # Scheduled mode - runs continuously
-        interval = int(sys.argv[2]) if len(sys.argv) > 2 else 24
+    # Parse command line arguments
+    config_file = None
+    export_mode = False
+    schedule_mode = False
+    interval = 24
+    
+    i = 1
+    while i < len(sys.argv):
+        if sys.argv[i] == '--config' and i + 1 < len(sys.argv):
+            config_file = sys.argv[i + 1]
+            i += 2
+        elif sys.argv[i] == '--export':
+            export_mode = True
+            i += 1
+        elif sys.argv[i] == '--schedule':
+            schedule_mode = True
+            if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit():
+                interval = int(sys.argv[i + 1])
+                i += 2
+            else:
+                i += 1
+        else:
+            i += 1
+    
+    # Load configuration
+    if config_file:
+        config = MonitorConfig.from_json(config_file)
+        print(f"✓ Loaded configuration from: {config_file}")
+    else:
+        # Try to load default config.json if it exists
+        default_config_path = Path("config.json")
+        if default_config_path.exists():
+            config = MonitorConfig.from_json(str(default_config_path))
+            print("✓ Loaded configuration from: config.json")
+        else:
+            config = MonitorConfig()
+            print("✓ Using default configuration")
+    
+    monitor = CryptoMonitor(config)
+    
+    # Export mode
+    if export_mode:
+        print("\nExporting historical data to CSV...")
+        monitor.data_manager.export_to_csv()
+        sys.exit(0)
+    
+    # Scheduled mode
+    if schedule_mode:
         run_scheduled_monitoring(interval_hours=interval)
     else:
         # Single execution mode
-        monitor = CryptoMonitor()
         report = monitor.execute_monitoring_cycle()
         
         if report:
             print("\n" + "=" * 70)
-            print("Report saved to: monitoring_data/latest_report.json")
-            print("Historical data: monitoring_data/price_history.json")
-            print("Logs: monitoring_data/crypto_monitor.log")
+            print("✓ Monitoring cycle completed successfully")
+            print("=" * 70)
+            print(f"Report saved to: {monitor.data_manager.report_file}")
+            print(f"Historical data: {monitor.data_manager.history_file}")
+            print(f"Logs: {monitor.data_manager.data_path / config.log_file}")
+            print("\nRun with --export to export data to CSV")
+            print("Run with --schedule to enable continuous monitoring")
             print("=" * 70)
             sys.exit(0)
         else:
-            print("Monitoring cycle failed. Check logs for details.")
+            print("\n⚠ Monitoring cycle failed. Check logs for details.")
             sys.exit(1)
 
 

@@ -1,0 +1,44 @@
+{
+  "api": {
+    "base_url": "https://api.coingecko.com/api/v3",
+    "timeout": 30,
+    "max_retries": 3,
+    "retry_delay": 5
+  },
+  "assets": {
+    "ada_id": "cardano",
+    "night_id": "midnight-3"
+  },
+  "thresholds": {
+    "target_ratio": 0.25,
+    "ratio_sell_pressure": 0.20,
+    "tvl_monthly_growth": 15.0,
+    "min_zk_dapps": 3,
+    "stability_threshold": 15.0,
+    "crash_threshold": 30.0,
+    "min_volume_ratio": 0.05
+  },
+  "weights": {
+    "tc01_weight": 40,
+    "tc02_weight": 30,
+    "tc03_weight": 20,
+    "tc04_weight": 10
+  },
+  "alerts": {
+    "enabled": true,
+    "email_notifications": false,
+    "slack_webhook": "",
+    "alert_on_score_below": 60
+  },
+  "data": {
+    "data_dir": "monitoring_data",
+    "history_file": "price_history.json",
+    "report_file": "latest_report.json",
+    "history_retention_days": 90
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_file": "crypto_monitor.log",
+    "console_output": true
+  }
+}
